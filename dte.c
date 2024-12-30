@@ -1,3 +1,7 @@
+#define _DEFAULT_SOURCE
+#define _BDS_SOURCE
+#define _GNU_SOURCE
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <string.h>
 
 //DEFINES
@@ -16,15 +21,25 @@ enum editorKey{
 	ARROW_RIGHT,
 	ARROW_UP,
 	ARROW_DOWN,
+	DEL_KEY,
+	HOME_KEY,
+	END_KEY,
 	PAGE_UP,
 	PAGE_DOWN
 };
 
 // DATA
+typedef struct erow{	//editor row
+	int size;
+	char* chars;
+} erow;
+
 struct editorConfig{
 	int cx, cy;
 	int screenRows;
 	int screenCols;
+	int numRows;
+	erow* row;
 	struct termios orig_termios;
 };
 
@@ -77,8 +92,13 @@ int editorReadKey(){
 				if ( read(STDIN_FILENO, &seq[2], 1) != 1 ) return '\x1b';
 				if ( seq[2] == '~' ) {
 					switch ( seq[1] ){
+						case '1': return HOME_KEY;
+						case '3': return DEL_KEY;
+						case '4': return END_KEY;
 						case '5': return PAGE_UP;
 						case '6': return PAGE_DOWN;
+						case '7': return HOME_KEY;
+						case '8': return END_KEY;
 					}
 				}
 			} else {
@@ -87,7 +107,14 @@ int editorReadKey(){
 					case 'B': return ARROW_DOWN;
 					case 'C': return ARROW_RIGHT;
 					case 'D': return ARROW_LEFT;
+					case 'H': return HOME_KEY;
+					case 'F': return END_KEY;
 				}
+			}
+		} else if ( seq[0] == 'O' ){
+			switch ( seq[1] ){
+				case 'H': return HOME_KEY;
+				case 'F': return END_KEY;
 			}
 		}
 		return '\x1b';
@@ -130,6 +157,37 @@ int getWindowSize(int* rows, int* cols){
 	}
 }
 
+//ROW OPERATION
+
+void editorAppendRow(char* s, size_t len){
+	E.row = realloc(E.row, sizeof(erow) * (E.numRows+1));
+
+	int at = E.numRows;
+	E.row[at].size = len;
+	E.row[at].chars = malloc(len+1);
+	memcpy(E.row[at].chars, s, len);
+	E.row[at].chars[len] = '\0';
+	E.numRows++;
+}
+
+//FILE I/O
+void editorOpen(char* filename){
+	FILE* fp = fopen(filename, "r");
+	if (!fp) die("fopen");
+
+	char* line = NULL;
+	size_t linecap = 0;
+	ssize_t linelen;
+	while ( (linelen = getline(&line, &linecap, fp)) != -1 ) {
+		while ( linelen > 0 && (line[linelen-1] == '\n' || line[linelen-1] == '\r') )
+			linelen--;
+
+		editorAppendRow(line, linelen);
+	}
+	free(line);
+	fclose(fp);
+}
+
 //BUFFER
 struct abuf{
 	char* b;
@@ -156,20 +214,26 @@ void abFree(struct abuf* ab){
 void editorDrawRows(struct abuf* ab){
 	int y;
 	for(y=0; y<E.screenRows; y++){
-		if( y == E.screenRows/3 ){
-			char welcome[80];
-			int welcomeLen = snprintf(welcome, sizeof(welcome),
-				"Diego Text Editor DTE -- version %s", DTE_VERSION);
-			if( welcomeLen > E.screenCols ) welcomeLen = E.screenCols;
-			int padding = (E.screenCols-welcomeLen)/2;
-			if( padding ){
+		if ( y >= E.numRows ) {
+			if( E.numRows == 0 && y == E.screenRows/3 ){
+				char welcome[80];
+				int welcomeLen = snprintf(welcome, sizeof(welcome),
+					"Diego Text Editor DTE -- version %s", DTE_VERSION);
+				if( welcomeLen > E.screenCols ) welcomeLen = E.screenCols;
+				int padding = (E.screenCols-welcomeLen)/2;
+				if( padding ){
+					abAppend(ab, "~", 1);
+					padding--;
+				}
+				while( padding-- ) abAppend(ab, " ", 1);
+				abAppend(ab, welcome, welcomeLen);
+			} else {
 				abAppend(ab, "~", 1);
-				padding--;
 			}
-			while( padding-- ) abAppend(ab, " ", 1);
-			abAppend(ab, welcome, welcomeLen);
 		} else {
-			abAppend(ab, "~", 1);
+			int len = E.row[y].size;
+			if ( len > E.screenCols ) len = E.screenCols;
+			abAppend(ab, E.row[y].chars, len);
 		}
 
 		abAppend(ab, "\x1b[K", 3);
@@ -225,6 +289,12 @@ void editorProcessKeypress(){
 			write(STDOUT_FILENO, "\x1b[H", 3);
 			exit(0);
 			break;
+		case HOME_KEY:
+			E.cx = 0;
+			break;
+		case END_KEY:
+			E.cx = E.screenCols-1;
+			break;
 		case PAGE_UP:
 		case PAGE_DOWN:
 			{
@@ -246,13 +316,19 @@ void editorProcessKeypress(){
 void initEditor(){
 	E.cx = 0;
 	E.cy = 0;
+	E.numRows = 0;
+	E.row = NULL;
 
 	if( getWindowSize(&E.screenRows,&E.screenCols) == -1) die("getWindowSize");
 }
 
-int main(){
+int main(int argc, char* argv[]){
 	enableRawMode();
 	initEditor();
+
+	if ( argc >= 2 ){
+		editorOpen(argv[1]);
+	}
 
 	while (1){
 		editorRefreshScreen();
